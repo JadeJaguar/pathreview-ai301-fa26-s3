@@ -4,17 +4,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy.sql import coercions, roles
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
+from structlog.testing import capture_logs
 
 from api.routes.health import health_check
-
-
-def _coerce_like_sqlalchemy(statement, *args, **kwargs):
-    """Run the statement check AsyncSession.execute runs first.
-
-    Raises ArgumentError for a plain string and accepts text().
-    """
-    return coercions.expect(roles.StatementRole, statement)
 
 
 async def _health_body(db):
@@ -34,13 +28,20 @@ class TestHealthCheck:
     """Test suite for the health check route."""
 
     @pytest.mark.asyncio
-    async def test_postgres_healthy_when_session_accepts_the_probe(self):
-        """Test postgres is healthy when the probe passes SQLAlchemy's statement check."""
+    async def test_postgres_healthy_when_session_runs_the_probe(self):
+        """Test postgres is healthy when a real SQLAlchemy session runs the probe."""
+        # A real Session on in-memory SQLite (stdlib sqlite3, no new dependency).
+        # Session.execute rejects a plain SQL string, like AsyncSession.execute.
+        session = Session(create_engine("sqlite://"))
         db = AsyncMock()
-        db.execute = AsyncMock(side_effect=_coerce_like_sqlalchemy)
+        db.execute = AsyncMock(side_effect=session.execute)
 
-        body = await _health_body(db)
+        with capture_logs() as logs:
+            body = await _health_body(db)
+        session.close()
 
+        failures = [entry for entry in logs if entry["event"] == "postgres_health_check_failed"]
+        assert failures == []
         assert body["dependencies"]["postgres"] == "healthy"
 
     @pytest.mark.asyncio
